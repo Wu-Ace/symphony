@@ -128,7 +128,7 @@ Minimal example:
 tracker:
   kind: linear
   provider:
-    project_slug: "..."
+    api_key: $LINEAR_API_KEY
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -179,6 +179,8 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - For the Linear adapter, `tracker.provider.api_key` reads from `LINEAR_API_KEY` when unset or
   when value is `$LINEAR_API_KEY`. The legacy flat `tracker.api_key` alias behaves the same way.
+- `tracker.provider.project_slug` is optional. Omit it to poll every project visible to the
+  configured Linear token, or set it to keep scheduler reads scoped to one project.
 - Do not put a literal tracker token in a repo-owned `WORKFLOW.md` if Codex can read that
   workspace. Use `$VAR`/host-side secret references so Symphony can keep the token out of the
   child environment.
@@ -210,13 +212,13 @@ codex:
 
 - Config: use `tracker.kind: linear` with `tracker.provider.endpoint` (default
   `https://api.linear.app/graphql`), `api_key` (defaults to `LINEAR_API_KEY` and accepts
-  `$VAR`), required `project_slug`, and optional `assignee` (a Linear user ID or `me`,
+  `$VAR`), optional `project_slug`, and optional `assignee` (a Linear user ID or `me`,
   defaulting to `LINEAR_ASSIGNEE`).
   The legacy flat `tracker.endpoint`, `api_key`, `project_slug`, and `assignee` aliases remain
   supported. `required_labels`, `active_states`, and `terminal_states` stay under `tracker`.
-- Scope and paging: candidate reads filter the configured project slug and requested state names,
-  following Linear pages of 50. ID refreshes are also project-scoped and batch up to 50 IDs. Empty
-  state/ID lists return `{:ok, []}` without a Linear request.
+- Scope and paging: candidate reads filter requested state names and, when configured, the project
+  slug, following Linear pages of 50. ID refreshes use the same optional project scope and batch up
+  to 50 IDs. Empty state/ID lists return `{:ok, []}` without a Linear request.
 - Identity and normalization: `issue.id` is the Linear issue ID and `issue.native_ref` is currently
   `nil`. Records missing a nonblank ID, identifier, title, or state are dropped from candidate
   pages and fail ID refreshes. State keeps Linear's spelling; integer priorities are preserved and
@@ -229,12 +231,12 @@ codex:
 - Tool: the Linear adapter advertises `linear_graphql`, accepting either a raw query string or an
   object with nonblank `query` and optional object `variables`. Symphony executes it host-side
   with the session-bound endpoint/token and strips declared token environment variables from the
-  Codex child. `project_slug` scopes scheduler reads, not raw tool calls; the tool can access
-  whatever the configured Linear token can access.
+  Codex child. When configured, `project_slug` scopes scheduler reads; omitting it makes scheduler
+  reads workspace-wide. Raw tool calls can access whatever the configured Linear token can access.
 - Responsibility and errors: `linear_graphql` adds no idempotency key, retry, scope guard, or
   rate-limit policy, so workflows own idempotent mutations and handling provider errors. Read/config
-  failures use `{:error, :missing_linear_api_token}`, `{:error, :missing_linear_project_slug}`,
-  `{:error, :invalid_linear_endpoint}`, `{:error, :invalid_linear_assignee}`,
+  failures use `{:error, :missing_linear_api_token}`, `{:error, :invalid_linear_endpoint}`,
+  `{:error, :invalid_linear_assignee}`,
   `{:error, :missing_linear_viewer_identity}`, `{:error, {:linear_api_status, status}}`,
   `{:error, {:linear_api_request, reason}}`, `{:error, {:linear_graphql_errors, errors}}`,
   `{:error, :linear_unknown_payload}`, or `{:error, :linear_missing_end_cursor}`. Tool results
@@ -242,7 +244,7 @@ codex:
   arguments, missing auth, and transport failures return `"success" => false` with
   `{"error": {"message": ...}}`, while top-level GraphQL errors preserve the response body with
   `"success" => false`.
-  For portable reporting, map missing/invalid token, project, endpoint, assignee, or viewer errors
+  For portable reporting, map missing/invalid token, endpoint, assignee, or viewer errors
   to `tracker_config` or `tracker_auth`, request failures to `tracker_transport`, non-200 responses to
   `tracker_response` (`429` is `tracker_rate_limited`), GraphQL/unknown payload failures to
   `tracker_payload`, and missing cursors to `tracker_pagination`; logs and tool responses carry the

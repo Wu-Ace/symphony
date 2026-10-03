@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Linear.Client do
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
 
-  @query """
+  @scoped_query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
       nodes {
@@ -55,7 +55,35 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @query_by_ids """
+  @unscoped_query """
+  query SymphonyLinearPoll($stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state { name }
+        branchName
+        url
+        assignee { id }
+        labels { nodes { name } }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue { id identifier state { name } }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  """
+
+  @scoped_query_by_ids """
   query SymphonyLinearIssuesById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {id: {in: $ids}, project: {slugId: {eq: $projectSlug}}}, first: $first) {
       nodes {
@@ -87,6 +115,33 @@ defmodule SymphonyElixir.Linear.Client do
                 name
               }
             }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+  """
+
+  @unscoped_query_by_ids """
+  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
+    issues(filter: {id: {in: $ids}}, first: $first) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state { name }
+        branchName
+        url
+        assignee { id }
+        labels { nodes { name } }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue { id identifier state { name } }
           }
         }
         createdAt
@@ -202,10 +257,11 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+  @spec fetch_issues_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()}), String.t() | nil) ::
           {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_ids_for_test(issue_ids, graphql_fun)
-      when is_list(issue_ids) and is_function(graphql_fun, 2) do
+  def fetch_issues_by_ids_for_test(issue_ids, graphql_fun, project_slug \\ "test-project")
+      when is_list(issue_ids) and is_function(graphql_fun, 2) and
+             (is_binary(project_slug) or is_nil(project_slug)) do
     ids = Enum.uniq(issue_ids)
 
     case ids do
@@ -213,7 +269,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, "test-project", nil, graphql_fun)
+        do_fetch_issue_states(ids, project_slug, nil, graphql_fun)
     end
   end
 
@@ -222,14 +278,21 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
+    {query, variables} =
+      scoped_request(
+        project_slug,
+        @scoped_query,
+        @unscoped_query,
+        %{
+          stateNames: state_names,
+          first: @issue_page_size,
+          relationFirst: @issue_page_size,
+          after: after_cursor
+        }
+      )
+
     with {:ok, body} <-
-           graphql(@query, %{
-             projectSlug: project_slug,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
+           graphql(query, variables),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
@@ -257,7 +320,7 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_issue_states(ids, project_slug, assignee_filter, graphql_fun)
-       when is_list(ids) and is_binary(project_slug) and is_function(graphql_fun, 2) do
+       when is_list(ids) and is_function(graphql_fun, 2) do
     issue_order_index = issue_order_index(ids)
     do_fetch_issue_states_page(ids, project_slug, assignee_filter, graphql_fun, [], issue_order_index)
   end
@@ -272,12 +335,19 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_issue_states_page(ids, project_slug, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
-    case graphql_fun.(@query_by_ids, %{
-           ids: batch_ids,
-           projectSlug: project_slug,
-           first: length(batch_ids),
-           relationFirst: @issue_page_size
-         }) do
+    {query, variables} =
+      scoped_request(
+        project_slug,
+        @scoped_query_by_ids,
+        @unscoped_query_by_ids,
+        %{
+          ids: batch_ids,
+          first: length(batch_ids),
+          relationFirst: @issue_page_size
+        }
+      )
+
+    case graphql_fun.(query, variables) do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response_strict(body, assignee_filter) do
           updated_acc = prepend_page_issues(issues, acc_issues)
@@ -311,6 +381,15 @@ defmodule SymphonyElixir.Linear.Client do
       %Issue{id: issue_id} -> Map.get(issue_order_index, issue_id, fallback_index)
       _ -> fallback_index
     end)
+  end
+
+  defp scoped_request(project_slug, scoped_query, unscoped_query, variables)
+       when is_map(variables) do
+    if is_binary(project_slug) and String.trim(project_slug) != "" do
+      {scoped_query, Map.put(variables, :projectSlug, project_slug)}
+    else
+      {unscoped_query, variables}
+    end
   end
 
   defp build_graphql_payload(query, variables, operation_name) do
@@ -558,7 +637,6 @@ defmodule SymphonyElixir.Linear.Client do
 
     cond do
       is_nil(tracker.api_key) -> {:error, :missing_linear_api_token}
-      is_nil(tracker.project_slug) -> {:error, :missing_linear_project_slug}
       true -> {:ok, tracker}
     end
   end
