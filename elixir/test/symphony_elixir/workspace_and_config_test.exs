@@ -611,6 +611,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                     }}
   end
 
+  test "linear client omits the project filter when project scope is not configured" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:unscoped_fetch_issue_states, query, variables})
+      {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
+    end
+
+    assert {:ok, []} =
+             Client.fetch_issues_by_ids_for_test(["issue-1"], graphql_fun, nil)
+
+    assert_receive {:unscoped_fetch_issue_states, query, %{ids: ["issue-1"], first: 1, relationFirst: 50}}
+
+    assert query =~ "SymphonyLinearIssuesById"
+    refute query =~ "projectSlug"
+    refute query =~ "slugId"
+  end
+
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
